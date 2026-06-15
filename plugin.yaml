@@ -1,0 +1,11 @@
+name: hermes-listening-profile
+version: 1.0.0
+description: Spotify listening profile — hourly polling, daily rollups, listening history, stats, and trends
+author: Aura
+provides_tools:
+  - listening_profile
+optional_env:
+  - name: LISTENING_PROFILE_POLL_INTERVAL
+    description: "Minutes between Spotify polls (default: 60)"
+  - name: LISTENING_PROFILE_SKIP_THRESHOLD
+    description: "Minimum listen ratio to count as a full listen (0.0 to 1.0, default: 0.5)"

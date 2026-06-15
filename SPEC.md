@@ -1,175 +1,88 @@
 # hermes-listening-profile
 
-> A Hermes plugin that tracks Spotify listening activity and builds a personal listening profile over time.
+> A Hermes plugin that tracks Spotify listening activity and builds personal listening profiles with real-time aggregation.
 
 ## Overview
 
-Polls the Spotify `recently_played` API hourly, stores deduplicated listening history as daily JSONL, and generates a polished listening profile daily. Exposes a `listening_profile` tool for on-demand queries. Fully self-contained — two daemon threads (poller + generator) that live and die with the gateway.
+The plugin captures raw listening history and rolls it up into daily profile snapshots. Tools dynamically aggregate these daily snapshots to generate profiles for any time window (weekly, monthly, all-time) in milliseconds.
 
 ## Architecture
 
 ```
-Spotify API → Poller (hourly, daemon) → raw daily JSONL + audio features
-                                              ↓
-                                Generator (daily, daemon)
-                                              ↓
-                                listening-profile.json  (machine-readable)
-                                listening-profile.md    (human-readable)
-                                              ↓
-                                listening_profile tool (on-demand queries)
+Spotify API → Poller (hourly) → logs/listening-history/YYYY-MM-DD.jsonl
+                                      ↓
+                         (Immediate Aggregation) 
+                                      ↓
+                              logs/listening-profile/YYYY-MM-DD.json
+                                      ↓
+                listening_profile Tool dynamically aggregates blocks
 ```
 
 ## Components
 
 ### 1. Poller (Daemon Thread)
+- Polls `recently_played` hourly on clock boundaries.
+- Deduplicates using `played_at` timestamps.
+- Prunes massive unused fields (like `available_markets`) to save disk space and LLM context.
+- Writes raw data to `logs/listening-history/YYYY-MM-DD.jsonl`.
+- Immediately after polling and writing new tracks, reads *today's* `listening-history` JSONL.
+- Applies skip detection based on timestamp gaps vs. track duration.
+- Rolls data into four hardcoded time blocks (Morning, Afternoon, Evening, Night).
+- Saves a compact aggregate to `logs/listening-profile/YYYY-MM-DD.json`.
 
-- Runs as a daemon thread inside the Hermes process, dies with the gateway
-- Polls Spotify `recently_played` (limit=50) on interval-aligned clock boundaries
-- **Deduplicates** by `played_at` — reads tail of current day's JSONL, builds set of existing timestamps, appends only new entries
-- For new (deduped) tracks: **batch-fetches audio features** from Spotify `/audio-features` endpoint (up to 100 IDs per call)
-- Writes self-contained entries to `logs/listening-profile/YYYY-MM-DD.jsonl`
-- PID lock prevents duplicate poller instances
-- `atexit` cleanup on process exit
+### 2. Tool Handler (On-Demand)
+- Reads the lightweight `.json` files, not the heavy `.jsonl` files (except for explicit history requests).
+- Instantly generates profiles, top tracks, top artists, and trend comparisons for any time scale.
 
-### 2. Generator (Daemon Thread)
+## Storage Formats
 
-- Runs as a daemon thread inside the Hermes process, dies with the gateway
-- Sleeps until the configured generation time (default: 07:00), wakes up, generates profile, goes back to sleep
-- Reads daily JSONL files up to **12 months** of history
-- Applies skip detection (timestamp gap heuristic)
-- Computes aggregated stats from pre-existing audio features (no API calls)
-- **Retry logic:** up to `LISTENING_PROFILE_MAX_RETRIES` attempts (default: 3) on failure, logs error if all retries fail
-- Outputs:
-  - `listening-profile.json` — machine-readable profile (plugin root)
-  - `listening-profile.md` — human-readable profile (plugin root)
+### 1. Raw History (`logs/listening-history/YYYY-MM-DD.jsonl`)
+Standard Spotify track object. One line per play event.
 
-### 3. Tool Handler (On-Demand)
-
-Exposes the `listening_profile` tool with these queries:
-
-| Query | Description |
-|-------|-------------|
-| `profile` | Returns the pre-computed profile (reads output files) |
-| `history` | Raw listening history, time-range filtered, paginated |
-| `stats` | Aggregated stats within a time window |
-| `trends` | On-demand trend comparison between two time windows |
-
-**Zero Spotify API calls** at query time — all data comes from JSONL files or the pre-computed profile.
-
-## Storage
-
-### Raw Data: `logs/listening-profile/YYYY-MM-DD.jsonl`
-
-Daily JSONL files. Each line is one track play event with full Spotify response + audio features:
-
+### 2. Profile Block (`logs/listening-profile/YYYY-MM-DD.json`)
 ```json
 {
-  "played_at": "2026-06-15T10:30:00.000Z",
-  "track": {
-    "id": "abc123",
-    "name": "Song Name",
-    "duration_ms": 240000,
-    "popularity": 72,
-    "explicit": false,
-    "external_urls": { "spotify": "https://open.spotify.com/track/..." },
-    "uri": "spotify:track:abc123"
+  "date": "2026-06-15",
+  "daily_totals": {
+    "total_plays": 45,
+    "full_listens": 42,
+    "listening_minutes": 142
   },
-  "artists": [{ "id": "...", "name": "Artist Name" }],
-  "album": {
-    "id": "...",
-    "name": "Album Name",
-    "release_date": "2024-01-15",
-    "album_type": "album",
-    "images": [...]
+  "artists": {
+    "The Strike": 7,
+    "London Elektricity": 2
   },
-  "context": { "type": "playlist", "uri": "spotify:playlist:..." },
-  "audio_features": {
-    "tempo": 128.5,
-    "energy": 0.82,
-    "valence": 0.65,
-    "danceability": 0.74,
-    "acousticness": 0.12,
-    "instrumentalness": 0.03,
-    "speechiness": 0.04,
-    "liveness": 0.11,
-    "key": 5,
-    "mode": 1,
-    "time_signature": 4
+  "tracks": {
+    "5cCjEHVU0cx...": {"name": "The Getaway - M10 Version", "plays": 7}
+  },
+  "time_blocks": {
+    "morning": {"plays": 12},
+    "afternoon": {"plays": 20},
+    "evening": {"plays": 10},
+    "night": {"plays": 3}
   }
 }
 ```
-
-### Output: Plugin Root
-
-- `listening-profile.json` — machine-readable profile
-- `listening-profile.md` — human-readable profile
-
-## Skip Detection
-
-- **Heuristic:** Compare `played_at` gap between consecutive tracks against `duration_ms`
-- Computed at aggregation time (generator + tool queries), not at poll time
-- If `gap_to_next < duration_ms × SKIP_THRESHOLD` → flagged as likely skip
-- `listen_ratio = gap_to_next / duration_ms`, capped at 1.0
-- Configurable via env var
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LISTENING_PROFILE_POLL_INTERVAL` | `3600` | Poll frequency in seconds |
+| `LISTENING_PROFILE_POLL_INTERVAL` | `60` | Poll frequency in minutes (minimum: 1) |
 | `LISTENING_PROFILE_SKIP_THRESHOLD` | `0.5` | Minimum listen ratio to count as full listen (0.0–1.0) |
-| `LISTENING_PROFILE_GENERATE_TIME` | `0700` | Daily profile generation time (24h format, local time) |
-| `LISTENING_PROFILE_MAX_RETRIES` | `3` | Max retry attempts for profile generation on failure |
 
-## Tool Query Details
+## Tool Queries
 
-### `history`
-- Parameters: `days` (default: 7, max: 30), `limit` (entries per page, default: 50), `offset` (skip N entries, default: 0)
-- Loads only daily JSONL files within the time window
-- Returns paginated track play events with `total` count for pagination
+| Query | Description | Data Source |
+|-------|-------------|-------------|
+| `profile` | Generates full JSON profile for a time window | `listening-profile/*.json` |
+| `history` | Paginated raw track log | `listening-history/*.jsonl` |
+| `stats` | Fast top-level stats | `listening-profile/*.json` |
+| `trends` | Delta comparing last N days vs previous N days | `listening-profile/*.json` |
 
-### `profile`
-- No parameters needed
-- Returns the pre-computed `listening-profile.json` contents
-
-### `stats`
-- Parameters: `days` (default: 7)
-- Returns: top artists, top tracks, total listening minutes, unique tracks, skip rate
-
-### `trends`
-- Parameters: `preset` — one of `weekly`, `biweekly`, `monthly`
-  - `weekly`: last 7 days vs 7 days before that
-  - `biweekly`: last 14 days vs 14 days before that
-  - `monthly`: last 30 days vs 30 days before that
-- Returns: genre shifts, artist discovery changes, energy/valence deltas
-- If insufficient data (JSONL files don't cover both windows), returns `{"error": "Not enough data for trends"}`
+All queries trigger an immediate Spotify poll before returning results, ensuring the freshest data is always included.
 
 ## Design Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Data source | Spotify API only | One source of truth, no merge logic |
-| Poll frequency | Hourly (configurable) | 50-track buffer covers ~3h; hourly polls never miss |
-| Dedup | In-poller, by `played_at` | Keeps JSONL clean without post-processing |
-| Audio features | In-poller, per new track | Single API contact point, all downstream is pure file reads |
-| Storage format | Daily JSONL | Simple, append-friendly, easy to filter by date |
-| Skip detection | On read/aggregation | Can't compute at poll time without modifying written entries |
-| Profile generation | Daemon thread in plugin | Self-contained, starts/stops with gateway, no separate cron |
-| Output location | Plugin root | Easy access for other tools and queries |
-| Trend analysis | On-demand tool query | 3 presets, no pre-computed trends needed |
-| History lookback | 12 months max | Balances completeness vs file scanning overhead |
-| Plugin enable/disable | Hermes config.yaml | Standard plugin pattern, no env var needed |
-
-## File Structure
-
-```
-hermes-listening-profile/
-├── __init__.py              # register(ctx) → start poller + generator + register tool
-├── poller.py                # ListeningPoller daemon thread
-├── generator.py             # ProfileGenerator daemon thread
-├── tools.py                 # listening_profile tool handler
-├── schemas.py               # Tool schema definition
-├── SPEC.md                  # This file
-├── listening-profile.json   # Generated profile (machine-readable)
-└── listening-profile.md     # Generated profile (human-readable)
-```
+- **Offline-First Polling**: Using hourly polling on the `recently_played` REST endpoint guarantees data capture even when the host PC is asleep (e.g., during commutes), leveraging Spotify's 50-track server-side buffer to fill the gaps.
+- **Time Blocks**: Hardcoded. Simpler, requires zero configuration, instantly maps to human rhythms.
+- **No Audio Features**: Spotify deprecated and removed the `/v1/audio-features` endpoint in late 2024. Consequently, sonic fingerprinting (Energy, BPM, Valence) has been explicitly excluded from this architecture to prevent API rejections and maintain speed.

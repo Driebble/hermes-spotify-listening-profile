@@ -17,15 +17,19 @@ This plugin runs entirely locally and offline-first, capturing your listening ha
 
 This plugin requires the core `spotify` plugin to be enabled and authenticated, as it reuses the underlying Spotify Client credentials.
 
-1. Ensure the `spotify` plugin is enabled in your `config.yaml`.
-2. Ensure you have authenticated via `hermes auth add spotify`.
-3. Enable this plugin by adding it to your `config.yaml`:
+1. Clone the plugin into your Hermes plugins directory:
+   ```bash
+   git clone https://github.com/Driebble/hermes-spotify-listening-profile.git ~/.hermes/plugins/hermes-spotify-listening-profile
+   ```
+2. Ensure the `spotify` plugin is enabled in your `config.yaml`.
+3. Ensure you have authenticated via `hermes auth add spotify`.
+4. Enable this plugin by adding it to your `config.yaml`:
    ```yaml
    plugins:
      enabled:
        - hermes-spotify-listening-profile
    ```
-4. Restart your Hermes gateway process.
+5. Restart your Hermes gateway process.
 
 ## Environment Variables
 

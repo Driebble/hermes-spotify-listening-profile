@@ -1,6 +1,6 @@
-name: hermes-listening-profile
+name: hermes-spotify-listening-profile
 version: 1.0.0
-description: Spotify listening profile — hourly polling, daily rollups, listening history, stats, and trends
+description: Spotify listening profile — hourly polling, listening history, stats, trends, and real-time aggregation
 author: Aura
 provides_tools:
   - listening_profile

@@ -1,4 +1,4 @@
-# hermes-listening-profile
+# hermes-spotify-listening-profile
 
 > A Hermes plugin that tracks Spotify listening activity and builds personal listening profiles with real-time aggregation.
 

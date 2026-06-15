@@ -56,7 +56,7 @@ def register(ctx):
         _log("Import OK, registering tool...")
         ctx.register_tool(
             name="listening_profile",
-            toolset="hermes-listening-profile",
+            toolset="hermes-spotify-listening-profile",
             schema=schemas.LISTENING_PROFILE,
             handler=profile_tools.listening_profile,
         )

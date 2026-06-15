@@ -1,4 +1,4 @@
-# Hermes Listening Profile Plugin
+# Hermes Spotify Listening Profile Plugin
 
 A Hermes Agent plugin that tracks your Spotify listening activity in the background and builds a personal listening profile. 
 
@@ -23,7 +23,7 @@ This plugin requires the core `spotify` plugin to be enabled and authenticated, 
    ```yaml
    plugins:
      enabled:
-       - hermes-listening-profile
+       - hermes-spotify-listening-profile
    ```
 4. Restart your Hermes gateway process.
 

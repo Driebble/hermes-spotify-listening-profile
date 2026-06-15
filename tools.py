@@ -68,6 +68,7 @@ def _aggregate_multiple_profiles(profiles: list[dict]) -> dict:
     
     artist_counts = defaultdict(int)
     track_counts = defaultdict(lambda: {"name": "", "plays": 0})
+    album_counts = defaultdict(lambda: {"name": "", "plays": 0})
     
     time_blocks = {
         "morning": {"plays": 0},
@@ -75,6 +76,16 @@ def _aggregate_multiple_profiles(profiles: list[dict]) -> dict:
         "evening": {"plays": 0},
         "night": {"plays": 0},
     }
+    
+    context_types = defaultdict(int)
+    popularity_sum = 0
+    popularity_count = 0
+    explicit_plays = 0
+    clean_plays = 0
+    release_years = defaultdict(int)
+    recent_releases = 0
+    catalog_releases = 0
+    total_new_artists = 0
     
     for p in profiles:
         totals = p.get("daily_totals", {})
@@ -89,14 +100,44 @@ def _aggregate_multiple_profiles(profiles: list[dict]) -> dict:
             track_counts[tid]["name"] = track_info["name"]
             track_counts[tid]["plays"] += track_info["plays"]
             
+        for aid, album_info in p.get("albums", {}).items():
+            album_counts[aid]["name"] = album_info["name"]
+            album_counts[aid]["plays"] += album_info["plays"]
+            
         for block_name, block_data in p.get("time_blocks", {}).items():
             if block_name not in time_blocks:
                 continue
             target_block = time_blocks[block_name]
             target_block["plays"] += block_data.get("plays", 0)
+            
+        for ctx_type, count in p.get("context_types", {}).items():
+            context_types[ctx_type] += count
+            
+        pop = p.get("popularity", {})
+        avg = pop.get("average", 0)
+        listens = totals.get("full_listens", 0)
+        if avg > 0 and listens > 0:
+            popularity_sum += avg * listens
+            popularity_count += listens
+            
+        expl = p.get("explicit_ratio", {})
+        explicit_plays += expl.get("explicit", 0)
+        clean_plays += expl.get("clean", 0)
+        
+        for year, count in p.get("release_years", {}).items():
+            release_years[str(year)] += count
+            
+        nvc = p.get("new_vs_catalog", {})
+        recent_releases += nvc.get("recent", 0)
+        catalog_releases += nvc.get("catalog", 0)
+        
+        total_new_artists += p.get("new_artists", 0)
 
     top_artists = [{"name": k, "plays": v} for k, v in sorted(artist_counts.items(), key=lambda x: -x[1])]
     top_tracks = [{"name": v["name"], "plays": v["plays"]} for tid, v in sorted(track_counts.items(), key=lambda x: -x[1]["plays"])]
+    top_albums = [{"name": v["name"], "plays": v["plays"]} for aid, v in sorted(album_counts.items(), key=lambda x: -x[1]["plays"])]
+    
+    avg_popularity = round(popularity_sum / popularity_count) if popularity_count > 0 else 0
     
     time_blocks_resolved = {}
     for block_name, block_data in time_blocks.items():
@@ -113,7 +154,22 @@ def _aggregate_multiple_profiles(profiles: list[dict]) -> dict:
         },
         "top_artists": top_artists[:20],
         "top_tracks": top_tracks[:20],
-        "time_blocks": time_blocks_resolved
+        "top_albums": top_albums[:20],
+        "time_blocks": time_blocks_resolved,
+        "context_types": dict(context_types),
+        "popularity": {
+            "average": avg_popularity
+        },
+        "explicit_ratio": {
+            "explicit": explicit_plays,
+            "clean": clean_plays
+        },
+        "release_years": dict(release_years),
+        "new_vs_catalog": {
+            "recent": recent_releases,
+            "catalog": catalog_releases
+        },
+        "total_new_artists": total_new_artists
     }
 
 
@@ -177,15 +233,30 @@ def _query_history(history_dir: Path, days: int, limit: int, offset: int) -> str
     total = len(entries)
     page = entries[offset:offset + limit]
     
+    # Strip to essential fields only
+    items = []
     for p in page:
-        p.pop("_dt", None)
+        track = p.get("track", {})
+        artists = [a.get("name", "") for a in track.get("artists", [])]
+        album = track.get("album", {})
+        items.append({
+            "played_at": p.get("played_at"),
+            "track": track.get("name"),
+            "artists": artists,
+            "duration_ms": track.get("duration_ms"),
+            "album": album.get("name"),
+            "album_type": album.get("album_type"),
+            "explicit": track.get("explicit"),
+            "popularity": track.get("popularity"),
+            "context_type": p.get("context", {}).get("type"),
+        })
         
     return json.dumps({
         "total": total,
         "offset": offset,
         "limit": limit,
         "period_days": days,
-        "items": page
+        "items": items
     }, ensure_ascii=False)
 
 
@@ -211,8 +282,15 @@ def _query_stats(profile_dir: Path, days: int) -> str:
         "listening_minutes": totals["listening_minutes"],
         "unique_tracks": len(agg["top_tracks"]),
         "unique_artists": len(agg["top_artists"]),
+        "unique_albums": len(agg["top_albums"]),
         "top_artists": agg["top_artists"][:10],
-        "top_tracks": agg["top_tracks"][:10]
+        "top_tracks": agg["top_tracks"][:10],
+        "top_albums": agg["top_albums"][:10],
+        "context_types": agg["context_types"],
+        "popularity": agg["popularity"],
+        "explicit_ratio": agg["explicit_ratio"],
+        "new_vs_catalog": agg["new_vs_catalog"],
+        "total_new_artists": agg["total_new_artists"]
     }, ensure_ascii=False)
 
 

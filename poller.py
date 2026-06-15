@@ -191,6 +191,7 @@ class ListeningPoller:
         if not SpotifyClient:
             return 0
         client = SpotifyClient()
+        new_count = 0
         try:
             data = client.get_recently_played(limit=50)
             if data and "items" in data:
@@ -200,10 +201,14 @@ class ListeningPoller:
                 new_items = [i for i in items if i.get("played_at") not in existing_timestamps]
                 if new_items:
                     self._process_and_save_items(client, new_items)
-                return len(new_items)
+                    new_count = len(new_items)
+                else:
+                    # No new tracks but still re-aggregate in case the aggregation logic changed
+                    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+                    self._generate_daily_profile(today)
         except Exception as e:
             print(f"[listening-profile] On-demand poll error: {e}")
-        return 0
+        return new_count
 
     def _get_time_block(self, dt: datetime) -> str:
         hour = dt.hour
@@ -277,12 +282,25 @@ class ListeningPoller:
             "night": {"plays": 0},
         }
         
+        # New aggregations
+        popularity_sum = 0
+        popularity_count = 0
+        explicit_plays = 0
+        context_types = defaultdict(int)
+        album_counts = defaultdict(int)
+        album_map = {}
+        release_years = defaultdict(int)
+        seen_artist_ids = set()
+        known_artist_ids = set()
+        
         for e in full_listens:
             track = e.get("track", {})
             track_name = track.get("name")
             track_id = track.get("id")
             artists = track.get("artists", [])
             dt = e.get("_dt")
+            context = e.get("context", {})
+            album = track.get("album", {})
             
             if not track_id:
                 continue
@@ -290,16 +308,63 @@ class ListeningPoller:
             track_map[track_id] = track_name
             track_counts[track_id] += 1
             
+            # Popularity
+            pop = track.get("popularity")
+            if pop is not None:
+                popularity_sum += pop
+                popularity_count += 1
+                
+            # Explicit
+            if track.get("explicit"):
+                explicit_plays += 1
+                
+            # Context type
+            ctx_type = context.get("type", "unknown")
+            context_types[ctx_type] += 1
+            
+            # Albums
+            album_id = album.get("id")
+            album_name = album.get("name")
+            if album_id and album_name:
+                album_map[album_id] = album_name
+                album_counts[album_id] += 1
+                
+            # Release year
+            release_date = album.get("release_date", "")
+            if release_date and len(release_date) >= 4:
+                try:
+                    year = int(release_date[:4])
+                    release_years[year] += 1
+                except ValueError:
+                    pass
+                    
+            # Artist discovery tracking
             for a in artists:
                 name = a.get("name")
+                artist_id = a.get("id")
                 if name:
                     artist_counts[name] += 1
+                if artist_id:
+                    if artist_id in seen_artist_ids:
+                        known_artist_ids.add(artist_id)
+                    seen_artist_ids.add(artist_id)
                     
             if dt:
                 block_name = self._get_time_block(dt)
                 time_blocks[block_name]["plays"] += 1
                 
         tracks_out = {tid: {"name": track_map[tid], "plays": count} for tid, count in track_counts.items()}
+        albums_out = {aid: {"name": album_map[aid], "plays": count} for aid, count in album_counts.items()}
+        
+        new_artist_ids = seen_artist_ids - known_artist_ids
+        
+        # Average popularity
+        avg_popularity = round(popularity_sum / popularity_count) if popularity_count > 0 else 0
+        
+        # Release year breakdown (recent = last 2 years, catalog = older)
+        current_year = datetime.now().astimezone().year
+        recent_releases = sum(count for year, count in release_years.items() if year >= current_year - 1)
+        catalog_releases = sum(count for year, count in release_years.items() if year < current_year - 1)
         
         profile_data = {
             "date": target_date,
@@ -310,7 +375,22 @@ class ListeningPoller:
             },
             "artists": dict(artist_counts),
             "tracks": tracks_out,
-            "time_blocks": time_blocks
+            "albums": albums_out,
+            "time_blocks": time_blocks,
+            "context_types": dict(context_types),
+            "popularity": {
+                "average": avg_popularity
+            },
+            "explicit_ratio": {
+                "explicit": explicit_plays,
+                "clean": len(full_listens) - explicit_plays
+            },
+            "release_years": dict(release_years),
+            "new_vs_catalog": {
+                "recent": recent_releases,
+                "catalog": catalog_releases
+            },
+            "new_artists": len(new_artist_ids)
         }
         
         json_path = self.profile_dir / f"{target_date}.json"

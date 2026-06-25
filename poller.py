@@ -64,7 +64,10 @@ class ListeningPoller:
         if lock_file.exists():
             try:
                 old_pid = int(lock_file.read_text().strip())
-                if _is_process_alive(old_pid):
+                # If the PID is different and that process is still running, lock it.
+                # If the PID matches our own, the previous thread in this process was 
+                # either stopped or lost during a reload. We should proceed.
+                if old_pid != os.getpid() and _is_process_alive(old_pid):
                     return
             except (ValueError, OSError):
                 pass
@@ -164,27 +167,55 @@ class ListeningPoller:
                 self._poll_count += 1  # Always increment to prevent tight spin on errors
 
     def _process_and_save_items(self, client: SpotifyClient, new_items: list[dict]):
-        """Save new items to JSONL."""
+        """Save new items to JSONL grouped by played_at day, aggregate per-day profile."""
+        from collections import defaultdict
         
-        # Write to JSONL
-        today = datetime.now().astimezone().strftime("%Y-%m-%d")
-        log_file = self.history_dir / f"{today}.jsonl"
+        # Group items by their actual played_at date (UTC, Spotify format is YYYY-MM-DDTHH:MM:SS.mmmZ)
+        items_by_day = defaultdict(list)
+        for item in new_items:
+            ts = item.get("played_at", "")
+            if not ts:
+                continue
+            play_date = ts[:10]  # YYYY-MM-DD prefix
+            items_by_day[play_date].append(item)
         
-        with open(log_file, "a", encoding="utf-8") as f:
-            for item in new_items:
-                track = item.get("track", {})
-                track_id = track.get("id")
-                
-                # Prune massive unused fields to save disk space and LLM context
-                if "available_markets" in track:
-                    track.pop("available_markets", None)
-                if "album" in track and "available_markets" in track["album"]:
-                    track["album"].pop("available_markets", None)
-                
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-                
-        # Immediately roll up the new day's profile
-        self._generate_daily_profile(today)
+        for play_date, day_items in items_by_day.items():
+            log_file = self.history_dir / f"{play_date}.jsonl"
+            existing_ts = set()
+            
+            if log_file.exists():
+                try:
+                    with open(log_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                                if "played_at" in entry:
+                                    existing_ts.add(entry["played_at"])
+                            except json.JSONDecodeError:
+                                pass
+                except OSError:
+                    pass
+            
+            truly_new = [i for i in day_items if i.get("played_at") not in existing_ts]
+            if not truly_new:
+                continue
+            
+            with open(log_file, "a", encoding="utf-8") as f:
+                for item in truly_new:
+                    track = item.get("track", {})
+                    # Prune massive unused fields to save disk space and LLM context
+                    if "available_markets" in track:
+                        track.pop("available_markets", None)
+                    if "album" in track and "available_markets" in track["album"]:
+                        track["album"].pop("available_markets", None)
+                    
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            
+            # Roll up the profile for THIS play_date (not today)
+            self._generate_daily_profile(play_date)
 
     def poll_now(self) -> int:
         """Trigger an immediate poll on demand. Returns number of new tracks fetched."""
@@ -294,13 +325,13 @@ class ListeningPoller:
         known_artist_ids = set()
         
         for e in full_listens:
-            track = e.get("track", {})
+            track = e.get("track") or {}
             track_name = track.get("name")
             track_id = track.get("id")
-            artists = track.get("artists", [])
+            artists = track.get("artists") or []
             dt = e.get("_dt")
-            context = e.get("context", {})
-            album = track.get("album", {})
+            context = e.get("context") or {}
+            album = track.get("album") or {}
             
             if not track_id:
                 continue

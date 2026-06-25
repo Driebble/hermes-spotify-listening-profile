@@ -88,46 +88,46 @@ def _aggregate_multiple_profiles(profiles: list[dict]) -> dict:
     total_new_artists = 0
     
     for p in profiles:
-        totals = p.get("daily_totals", {})
+        totals = p.get("daily_totals") or {}
         total_plays += totals.get("total_plays", 0)
         full_listens += totals.get("full_listens", 0)
         listening_minutes += totals.get("listening_minutes", 0)
         
-        for artist, count in p.get("artists", {}).items():
+        for artist, count in (p.get("artists") or {}).items():
             artist_counts[artist] += count
             
-        for tid, track_info in p.get("tracks", {}).items():
+        for tid, track_info in (p.get("tracks") or {}).items():
             track_counts[tid]["name"] = track_info["name"]
             track_counts[tid]["plays"] += track_info["plays"]
             
-        for aid, album_info in p.get("albums", {}).items():
+        for aid, album_info in (p.get("albums") or {}).items():
             album_counts[aid]["name"] = album_info["name"]
             album_counts[aid]["plays"] += album_info["plays"]
             
-        for block_name, block_data in p.get("time_blocks", {}).items():
+        for block_name, block_data in (p.get("time_blocks") or {}).items():
             if block_name not in time_blocks:
                 continue
             target_block = time_blocks[block_name]
-            target_block["plays"] += block_data.get("plays", 0)
+            target_block["plays"] += (block_data or {}).get("plays", 0)
             
-        for ctx_type, count in p.get("context_types", {}).items():
+        for ctx_type, count in (p.get("context_types") or {}).items():
             context_types[ctx_type] += count
             
-        pop = p.get("popularity", {})
+        pop = p.get("popularity") or {}
         avg = pop.get("average", 0)
         listens = totals.get("full_listens", 0)
         if avg > 0 and listens > 0:
             popularity_sum += avg * listens
             popularity_count += listens
             
-        expl = p.get("explicit_ratio", {})
+        expl = p.get("explicit_ratio") or {}
         explicit_plays += expl.get("explicit", 0)
         clean_plays += expl.get("clean", 0)
         
-        for year, count in p.get("release_years", {}).items():
+        for year, count in (p.get("release_years") or {}).items():
             release_years[str(year)] += count
             
-        nvc = p.get("new_vs_catalog", {})
+        nvc = p.get("new_vs_catalog") or {}
         recent_releases += nvc.get("recent", 0)
         catalog_releases += nvc.get("catalog", 0)
         
@@ -236,9 +236,9 @@ def _query_history(history_dir: Path, days: int, limit: int, offset: int) -> str
     # Strip to essential fields only
     items = []
     for p in page:
-        track = p.get("track", {})
-        artists = [a.get("name", "") for a in track.get("artists", [])]
-        album = track.get("album", {})
+        track = p.get("track") or {}
+        artists = [a.get("name", "") for a in (track.get("artists") or [])]
+        album = track.get("album") or {}
         items.append({
             "played_at": p.get("played_at"),
             "track": track.get("name"),
@@ -248,7 +248,7 @@ def _query_history(history_dir: Path, days: int, limit: int, offset: int) -> str
             "album_type": album.get("album_type"),
             "explicit": track.get("explicit"),
             "popularity": track.get("popularity"),
-            "context_type": p.get("context", {}).get("type"),
+            "context_type": (p.get("context") or {}).get("type"),
         })
         
     return json.dumps({
@@ -338,14 +338,27 @@ def _safe_int(val, default: int, min_val: int = 1, max_val: int = 9999) -> int:
 
 
 def _do_refresh() -> int:
-    """Trigger an immediate poll via the module-level poller reference. Returns new track count."""
+    """Trigger an immediate poll via the module-level poller reference or new temporary instance. Returns new track count."""
     global _active_poller
     if _active_poller:
         try:
             return _active_poller.poll_now()
         except Exception:
             return 0
-    return 0
+    else:
+        # Fallback for worker subprocess environments where _active_poller reference is lost
+        try:
+            from .poller import ListeningPoller
+            history_dir = _get_history_dir()
+            profile_dir = _get_profile_dir()
+            poller = ListeningPoller(
+                poll_interval=3600,
+                history_dir=history_dir,
+                profile_dir=profile_dir
+            )
+            return poller.poll_now()
+        except Exception:
+            return 0
 
 
 def listening_profile(args: dict, **kwargs) -> str:

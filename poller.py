@@ -170,13 +170,17 @@ class ListeningPoller:
         """Save new items to JSONL grouped by played_at day, aggregate per-day profile."""
         from collections import defaultdict
         
-        # Group items by their actual played_at date (UTC, Spotify format is YYYY-MM-DDTHH:MM:SS.mmmZ)
+        # Group items by their actual local calendar played date to prevent cross-day misattribution
         items_by_day = defaultdict(list)
         for item in new_items:
-            ts = item.get("played_at", "")
-            if not ts:
+            ts_str = item.get("played_at", "")
+            if not ts_str:
                 continue
-            play_date = ts[:10]  # YYYY-MM-DD prefix
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone()
+                play_date = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                play_date = ts_str[:10]
             items_by_day[play_date].append(item)
         
         for play_date, day_items in items_by_day.items():
@@ -321,8 +325,21 @@ class ListeningPoller:
         album_counts = defaultdict(int)
         album_map = {}
         release_years = defaultdict(int)
-        seen_artist_ids = set()
-        known_artist_ids = set()
+        
+        # Load historically seen artist names from previous profiles to track true discoveries
+        previously_seen = set()
+        try:
+            for f in os.listdir(self.profile_dir):
+                if f.endswith(".json"):
+                    file_date = f.removesuffix(".json")
+                    if file_date < target_date:
+                        with open(self.profile_dir / f, "r", encoding="utf-8") as pf:
+                            profile_data = json.load(pf)
+                            previously_seen.update(profile_data.get("artists", {}).keys())
+        except Exception:
+            pass
+
+        new_artists = set()
         
         for e in full_listens:
             track = e.get("track") or {}
@@ -372,13 +389,10 @@ class ListeningPoller:
             # Artist discovery tracking
             for a in artists:
                 name = a.get("name")
-                artist_id = a.get("id")
                 if name:
                     artist_counts[name] += 1
-                if artist_id:
-                    if artist_id in seen_artist_ids:
-                        known_artist_ids.add(artist_id)
-                    seen_artist_ids.add(artist_id)
+                    if name not in previously_seen:
+                        new_artists.add(name)
                     
             if dt:
                 block_name = self._get_time_block(dt)
@@ -386,8 +400,6 @@ class ListeningPoller:
                 
         tracks_out = {tid: {"name": track_map[tid], "plays": count} for tid, count in track_counts.items()}
         albums_out = {aid: {"name": album_map[aid], "plays": count} for aid, count in album_counts.items()}
-        
-        new_artist_ids = seen_artist_ids - known_artist_ids
         
         # Average popularity
         avg_popularity = round(popularity_sum / popularity_count) if popularity_count > 0 else 0
@@ -421,10 +433,20 @@ class ListeningPoller:
                 "recent": recent_releases,
                 "catalog": catalog_releases
             },
-            "new_artists": len(new_artist_ids)
+            "new_artists": len(new_artists)
         }
         
         json_path = self.profile_dir / f"{target_date}.json"
+        temp_path = self.profile_dir / f"{target_date}.json.tmp"
         with self._profile_lock:
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(profile_data, f, indent=2, ensure_ascii=False)
+            try:
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                os.replace(temp_path, json_path)
+            except Exception as e:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+                raise e

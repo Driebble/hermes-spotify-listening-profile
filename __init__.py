@@ -73,6 +73,14 @@ def register(ctx):
     except ValueError:
         poll_interval = 3600
 
+    # Stop existing poller if already registered to prevent thread leakage on reload
+    if hasattr(profile_tools, "_active_poller") and profile_tools._active_poller:
+        try:
+            _log("Stopping existing poller thread...")
+            profile_tools._active_poller.stop()
+        except Exception as e:
+            _log(f"Failed to stop old poller: {e}")
+
     history_dir = _get_history_dir()
     profile_dir = _get_profile_dir()
     
